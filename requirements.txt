@@ -1,2 +1,2 @@
-streamlit
-networkx
+streamlit>=1.45,<2
+networkx>=3,<4
