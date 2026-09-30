@@ -3,7 +3,6 @@
 Implement the functions marked below. Do not modify utils.py or logic_.py.
 """
 
-from collections import defaultdict
 from utils import *
 from logic_ import *
 
@@ -78,6 +77,32 @@ def build_general_kb(n, box_h, box_w, givens):
     return kb
 
 
+class _IndexedDefiniteKB(PropDefiniteKB):
+    """The supplied KB with a cached premise lookup for library FC.
+
+    Inference remains in logic_.pl_fc_entails; only its repeated linear
+    clause lookup is indexed. Neither support file is changed.
+    """
+
+    def tell(self, sentence):
+        super().tell(sentence)
+        self._premise_index = None
+
+    def retract(self, sentence):
+        super().retract(sentence)
+        self._premise_index = None
+
+    def clauses_with_premise(self, premise):
+        if getattr(self, '_premise_index', None) is None:
+            index = defaultdict(list)
+            for clause in self.clauses:
+                if clause.op == '==>':
+                    for item in conjuncts(clause.args[0]):
+                        index[item].append(clause)
+            self._premise_index = index
+        return self._premise_index.get(premise, [])
+
+
 def build_definite_kb(n, box_h, box_w, givens):
     """Return a PropDefiniteKB encoding this n x n Sudoku's constraints plus
     the given cells, using elimination + last-candidate reasoning.
@@ -91,7 +116,7 @@ def build_definite_kb(n, box_h, box_w, givens):
     -------
     PropDefiniteKB
     """
-    kb = PropDefiniteKB()
+    kb = _IndexedDefiniteKB()
 
     # 1. Given facts (clues)
     for (r, c), v in givens.items():
@@ -148,132 +173,82 @@ def build_definite_kb(n, box_h, box_w, givens):
 
 
 def solve_full_grid_fc(n, box_h, box_w, givens):
-    """Solve the whole puzzle using build_definite_kb + pl_fc_entails.
-
-    Returns
-    -------
-    dict[(int, int), int] -- {(row, col): value} for every cell
-    """
+    """Query each cell/value using the supplied pl_fc_entails algorithm."""
     kb = build_definite_kb(n, box_h, box_w, givens)
-
-    # Perform efficient forward chaining across all clauses
-    count = {c: len(conjuncts(c.args[0])) for c in kb.clauses if c.op == '==>'}
-    inferred = defaultdict(bool)
-    agenda = [s for s in kb.clauses if is_prop_symbol(s.op)]
-
-    premise_to_clauses = defaultdict(list)
-    for c in kb.clauses:
-        if c.op == '==>':
-            for p in conjuncts(c.args[0]):
-                premise_to_clauses[p].append(c)
-
-    while agenda:
-        p = agenda.pop()
-        if not inferred[p]:
-            inferred[p] = True
-            for c in premise_to_clauses[p]:
-                count[c] -= 1
-                if count[c] == 0:
-                    agenda.append(c.args[1])
-
-    grid = {}
+    grid = dict(givens)
     for r in range(1, n + 1):
         for c in range(1, n + 1):
+            if (r, c) in grid:
+                continue
             for v in range(1, n + 1):
-                if inferred[atom('Is', r, c, v)]:
+                if pl_fc_entails(kb, atom('Is', r, c, v)):
                     grid[(r, c)] = v
                     break
-
     return grid
 
 
 def pl_bc_entails(kb, query):
-    """Your own backward-chaining implementation.
+    """Recursive AND/OR backward proof with cycle-safe positive tabling.
 
-    Parameters
-    ----------
-    kb : PropDefiniteKB
-    query : Expr
-
-    Returns
-    -------
-    bool
+    A failed cyclic branch is not a global disproof. Retry the query with a
+    fresh failure table whenever a pass has proved new facts. This computes
+    only proofs reached from the query, without a forward-closure prepass.
+    Cached results are invalidated whenever the KB clauses change.
     """
-    facts = {c for c in kb.clauses if is_prop_symbol(c.op)}
-    if query in facts:
+    snapshot = tuple(kb.clauses)
+    if getattr(kb, '_bc_snapshot', None) != snapshot:
+        rules = defaultdict(list)
+        facts = set()
+        for clause in kb.clauses:
+            if clause.op == '==>':
+                rules[clause.args[1]].append(tuple(conjuncts(clause.args[0])))
+            else:
+                facts.add(clause)
+        kb._bc_snapshot = snapshot
+        kb._bc_rules = rules
+        kb._bc_proved = facts
+        kb._bc_false = set()
+
+    proved = kb._bc_proved
+    if query in proved:
         return True
+    if query in kb._bc_false:
+        return False
 
-    # Goal-directed Backward Chaining:
-    # 1. Trace backward from query to identify relevant dependency subgraph
-    rules_by_head = defaultdict(list)
-    for c in kb.clauses:
-        if c.op == '==>':
-            rules_by_head[c.args[1]].append(c)
-
-    relevant_goals = {query}
-    frontier = [query]
-    while frontier:
-        g = frontier.pop()
-        for c in rules_by_head.get(g, []):
-            for p in conjuncts(c.args[0]):
-                if p not in relevant_goals:
-                    relevant_goals.add(p)
-                    frontier.append(p)
-
-    # 2. Evaluate entailment over the goal-directed relevant clause subset
-    relevant_clauses = [c for c in kb.clauses if c.op == '==>' and c.args[1] in relevant_goals]
-    count = {c: len(conjuncts(c.args[0])) for c in relevant_clauses}
-    premise_to_c = defaultdict(list)
-    for c in relevant_clauses:
-        for p in conjuncts(c.args[0]):
-            premise_to_c[p].append(c)
-
-    agenda = [s for s in facts if s in relevant_goals or s in premise_to_c]
-    inferred = set(agenda)
-
-    while agenda:
-        p = agenda.pop()
-        if p == query:
+    def prove(goal, visiting, failed):
+        if goal in proved:
             return True
-        for c in premise_to_c.get(p, []):
-            count[c] -= 1
-            if count[c] == 0:
-                head = c.args[1]
-                if head not in inferred:
-                    inferred.add(head)
-                    agenda.append(head)
+        if goal in visiting or goal in failed:
+            return False
+        visiting.add(goal)
+        for premises in kb._bc_rules.get(goal, []):  # OR across rules
+            if all(prove(p, visiting, failed) for p in premises):  # AND
+                visiting.remove(goal)
+                proved.add(goal)
+                return True
+        visiting.remove(goal)
+        failed.add(goal)  # Valid only for this pass, not a permanent disproof.
+        return False
 
-    return query in inferred
+    while True:
+        before = len(proved)
+        if prove(query, set(), set()):
+            return True
+        if len(proved) == before:
+            kb._bc_false.add(query)
+            return False
 
 
 def solve_full_grid_bc(n, box_h, box_w, givens):
-    """Solve the whole puzzle using build_definite_kb + your own pl_bc_entails.
-
-    For each cell, try each candidate value until pl_bc_entails confirms one
-    -- the same per-cell strategy as solve_full_grid_fc, but backed by
-    backward chaining instead of a single shared forward-chaining pass.
-
-    Returns
-    -------
-    dict[(int, int), int] -- {(row, col): value} for every cell
-    """
+    """Query each cell/value with recursive backward chaining."""
     kb = build_definite_kb(n, box_h, box_w, givens)
     grid = dict(givens)
-    unsolved = [(r, c) for r in range(1, n + 1) for c in range(1, n + 1) if (r, c) not in grid]
-
-    while unsolved:
-        progress = False
-        for (r, c) in list(unsolved):
+    for r in range(1, n + 1):
+        for c in range(1, n + 1):
+            if (r, c) in grid:
+                continue
             for v in range(1, n + 1):
-                query = atom('Is', r, c, v)
-                if pl_bc_entails(kb, query):
+                if pl_bc_entails(kb, atom('Is', r, c, v)):
                     grid[(r, c)] = v
-                    unsolved.remove((r, c))
-                    kb.tell(query)
-                    progress = True
                     break
-        if not progress:
-            break
-
     return grid
-

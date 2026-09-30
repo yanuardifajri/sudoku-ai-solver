@@ -121,91 +121,116 @@ puzzles = pool['puzzles']
 
 
 # --- Helper: Capture Dynamic Reasoning Trace (Forward Inference Stepper) ---
+def capture_inference(n, box_h, box_w, givens):
+    """Instrument actual Horn rule firings for the UI, recording proof parents."""
+    kb = build_definite_kb(n, box_h, box_w, givens)
+    pending, uses, proofs = {}, defaultdict(list), {}
+    agenda = []
+    for clause in kb.clauses:
+        if clause.op == '==>':
+            premises = conjuncts(clause.args[0])
+            pending[clause] = len(premises)
+            for premise in premises:
+                uses[premise].append(clause)
+        else:
+            agenda.append(clause)
+            proofs[clause] = ()
+    inferred, order = set(), []
+    while agenda:
+        fact = agenda.pop()
+        if fact in inferred:
+            continue
+        inferred.add(fact)
+        order.append(fact)
+        for clause in uses[fact]:
+            pending[clause] -= 1
+            head = clause.args[1]
+            if pending[clause] == 0 and head not in proofs:
+                proofs[head] = tuple(conjuncts(clause.args[0]))
+                agenda.append(head)
+    return inferred, proofs, order
+
+
+def symbol_parts(symbol):
+    name = symbol.op
+    prefix = 'Not' if name.startswith('Not') else 'Is'
+    return prefix, *map(int, name[len(prefix):].split('_'))
+
+
+def elimination_details(symbol, proofs):
+    _, r, c, v = symbol_parts(symbol)
+    source = proofs[symbol][0]
+    _, pr, pc, pv = symbol_parts(source)
+    if (r, c) == (pr, pc):
+        scope = 'Cell'
+        explanation = f'Cell ({r}, {c}) already has value {pv}'
+    elif r == pr:
+        scope = 'Row'
+        explanation = f'Row {r} already contains value {v} at cell ({pr}, {pc})'
+    elif c == pc:
+        scope = 'Column'
+        explanation = f'Column {c} already contains value {v} at cell ({pr}, {pc})'
+    else:
+        scope = 'Box'
+        explanation = f'The same box contains value {v} at cell ({pr}, {pc})'
+    return {'val': v, 'scope': scope, 'peer_cell': (pr, pc),
+            'rule': f'{source} ==> {symbol}', 'explanation': explanation}
+
+
 def capture_full_grid_reasoning_trace(n, box_h, box_w, givens):
-    """
-    Instruments forward reasoning over the Definite KB to capture step-by-step
-    deductions with complete peer elimination breakdowns and Horn rule firings.
-    """
-    grid = dict(givens)
-    unsolved = [(r, c) for r in range(1, n + 1) for c in range(1, n + 1) if (r, c) not in grid]
-    traces = []
-    
-    step_num = 1
-    while unsolved:
-        found = False
-        for (r, c) in list(unsolved):
-            br = ((r - 1) // box_h) * box_h + 1
-            bc = ((c - 1) // box_w) * box_w + 1
-            
-            eliminations = []
-            eliminated_values = set()
-            
-            for v in range(1, n + 1):
-                row_peer = next(((r, c2) for c2 in range(1, n + 1) if (r, c2) in grid and grid[(r, c2)] == v), None)
-                col_peer = next(((r2, c) for r2 in range(1, n + 1) if (r2, c) in grid and grid[(r2, c)] == v), None)
-                box_peer = next(((r2, c2) for r2 in range(br, br + box_h) for c2 in range(bc, bc + box_w) if (r2, c2) in grid and grid[(r2, c2)] == v), None)
-                
-                if row_peer:
-                    eliminated_values.add(v)
-                    eliminations.append({
-                        'val': v,
-                        'scope': 'Row',
-                        'peer_cell': row_peer,
-                        'rule': f"Is{r}_{row_peer[1]}_{v} ==> Not{r}_{c}_{v}",
-                        'explanation': f"Row {r} already contains Value {v} at Cell {row_peer}"
-                    })
-                elif col_peer:
-                    eliminated_values.add(v)
-                    eliminations.append({
-                        'val': v,
-                        'scope': 'Column',
-                        'peer_cell': col_peer,
-                        'rule': f"Is{col_peer[0]}_{c}_{v} ==> Not{r}_{c}_{v}",
-                        'explanation': f"Column {c} already contains Value {v} at Cell {col_peer}"
-                    })
-                elif box_peer:
-                    eliminated_values.add(v)
-                    box_idx = ((r - 1) // box_h) * (n // box_w) + ((c - 1) // box_w) + 1
-                    eliminations.append({
-                        'val': v,
-                        'scope': 'Box',
-                        'peer_cell': box_peer,
-                        'rule': f"Is{box_peer[0]}_{box_peer[1]}_{v} ==> Not{r}_{c}_{v}",
-                        'explanation': f"Subgrid Box {box_idx} already contains Value {v} at Cell {box_peer}"
-                    })
-                    
-            remaining = [v for v in range(1, n + 1) if v not in eliminated_values]
-            if len(remaining) == 1:
-                deduced_v = remaining[0]
-                grid_before = dict(grid)
-                grid[(r, c)] = deduced_v
-                grid_after = dict(grid)
-                unsolved.remove((r, c))
-                
-                not_premises = " & ".join([f"Not{r}_{c}_{v_other}" for v_other in range(1, n + 1) if v_other != deduced_v])
-                horn_rule = f"({not_premises}) ==> Is{r}_{c}_{deduced_v}"
-                peer_cells = [e['peer_cell'] for e in eliminations]
-                
-                elim_vals_str = ", ".join(str(e['val']) for e in sorted(eliminations, key=lambda x: x['val']))
-                traces.append({
-                    'step': step_num,
-                    'cell': (r, c),
-                    'value': deduced_v,
-                    'grid_before': grid_before,
-                    'grid_after': grid_after,
-                    'eliminations': eliminations,
-                    'horn_rule': horn_rule,
-                    'peer_cells': peer_cells,
-                    'summary': f"Candidate values {{{elim_vals_str}}} were eliminated. Cell ({r}, {c}) is deduced to be {deduced_v} (Naked Single)."
-                })
-                step_num += 1
-                found = True
-                break
-                
-        if not found:
-            break
-            
+    _, proofs, order = capture_inference(n, box_h, box_w, givens)
+    grid, traces = dict(givens), []
+    for symbol in order:
+        prefix, r, c, v = symbol_parts(symbol)
+        if prefix != 'Is' or (r, c) in givens:
+            continue
+        eliminations = [elimination_details(p, proofs) for p in proofs[symbol]]
+        before = dict(grid)
+        grid[(r, c)] = v
+        traces.append({
+            'step': len(traces) + 1, 'cell': (r, c), 'value': v,
+            'grid_before': before, 'grid_after': dict(grid),
+            'eliminations': eliminations,
+            'horn_rule': f"({' & '.join(map(str, proofs[symbol]))}) ==> {symbol}",
+            'peer_cells': [e['peer_cell'] for e in eliminations],
+            'summary': f'All other values were eliminated by proven rules. Cell ({r}, {c}) must be {v}.',
+        })
     return traces, grid
+
+
+def capture_query_reasoning_trace(n, box_h, box_w, givens, r, c, v):
+    inferred, proofs, order = capture_inference(n, box_h, box_w, givens)
+    query, negative = atom('Is', r, c, v), atom('Not', r, c, v)
+    target = query if query in inferred else negative if negative in inferred else None
+    relevant = set()
+
+    def visit(symbol):
+        if symbol in relevant:
+            return
+        relevant.add(symbol)
+        for premise in proofs[symbol]:
+            visit(premise)
+
+    if target is not None:
+        visit(target)
+    steps = []
+    for symbol in order:
+        if symbol not in relevant:
+            continue
+        prefix, sr, sc, sv = symbol_parts(symbol)
+        if not proofs[symbol]:
+            steps.append(f'Given: cell ({sr}, {sc}) has value {sv}.')
+        elif prefix == 'Not':
+            details = elimination_details(symbol, proofs)
+            steps.append(f"{details['explanation']}; eliminate {sv} from cell ({sr}, {sc}).")
+        else:
+            steps.append(f'All other candidates in cell ({sr}, {sc}) have been eliminated; deduce value {sv}.')
+    return {
+        'eliminated': [value for value in range(1, n + 1)
+                       if atom('Not', r, c, value) in inferred],
+        'ruled_out': negative in inferred, 'steps': steps,
+        'entailed': query in inferred,
+    }
 
 
 # --- Helper Function to Render Visual Board ---
@@ -310,7 +335,6 @@ with st.sidebar:
 
     selected_puzzle = puzzles[st.session_state.selected_puzzle_idx]
     givens = {tuple(int(x) for x in k.split('_')): v for k, v in selected_puzzle['givens'].items()}
-    true_solution = {tuple(int(x) for x in k.split('_')): v for k, v in selected_puzzle['solution'].items()}
 
     st.divider()
     st.markdown("### :material/info: Puzzle Metadata")
@@ -441,7 +465,7 @@ with col_controls:
                     
                     if step_clicked:
                         st.session_state.view_mode = "stepper"
-                        st.session_state.step_index = 1
+                        st.session_state.step_index = 1 if traces else 0
                     else:
                         st.session_state.view_mode = "full"
                     st.rerun()
@@ -498,6 +522,7 @@ with col_controls:
                         'c': target_c,
                         'v': target_v,
                         'entailed': is_entailed,
+                        'trace': capture_query_reasoning_trace(n, box_h, box_w, givens, target_r, target_c, target_v),
                     }
 
             # Display Query Result
@@ -513,7 +538,7 @@ with col_controls:
                     )
                 else:
                     st.error(
-                        f"**NOT ENTAILED (False):** Proposition `Is{r}_{c}_{v}` is NOT a valid fact or solution value.",
+                        f"**NOT ENTAILED (False):** Proposition `Is{r}_{c}_{v}` cannot be proved from this Horn Knowledge Base.",
                         icon=":material/cancel:",
                     )
 
@@ -536,7 +561,7 @@ with col_controls:
             # Subview 1: Definite (Horn) KB
             if kb_view == "Definite / Horn KB (build_definite_kb)":
                 st.markdown("#### :material/schema: Definite (Horn) Knowledge Base (`PropDefiniteKB`)")
-                st.markdown(r"Encodes Sudoku using strictly **$\le 1$ positive literal per clause** via the **Elimination + Last Candidate (Naked Single)** strategy.")
+                st.markdown(r"Encodes Sudoku using **exactly one positive literal per definite clause** via the **Elimination + Last Candidate (Naked Single)** strategy.")
                 
                 km1, km2, km3 = st.columns(3)
                 with km1:
@@ -621,11 +646,11 @@ with col_controls:
                     |---|---|---|
                     | **KB Class** | `PropKB` | `PropDefiniteKB` |
                     | **Symbol Families** | Only $Is_{r,c,v}$ (729 symbols) | Dual: $Is_{r,c,v}$ & $Not_{r,c,v}$ (1,458 symbols) |
-                    | **Clause Restriction** | Unrestricted CNF | Strictly $\le 1$ positive literal per clause |
+                    | **Clause Restriction** | Unrestricted CNF | Exactly one positive literal per definite clause |
                     | **At-Least-One Encoding** | $Is_1 \lor \dots \lor Is_n$ (Disjunctive non-Horn) | $(\bigwedge_{v' \neq v} Not_{r,c,v'}) \implies Is_{r,c,v}$ (Horn) |
                     | **Uniqueness Encoding** | Negative binary clauses: $\neg Is_1 \lor \neg Is_2$ | Forward elimination rules: $Is_{r,c,v} \implies Not_{r',c',v}$ |
                     | **Inference Algorithms** | `pl_resolution`, `tt_entails` (Model Checking) | `pl_fc_entails` (Forward Chaining), `pl_bc_entails` (Backward Chaining) |
-                    | **Time Complexity** | Worst-case exponential $O(2^V)$ / Intractable | Linear in KB size $O(\text{Literals})$ / Deterministic |
+                    | **Time Complexity** | Worst-case exponential $O(2^V)$ / Intractable | One indexed FC pass is linear in literals; repeated queries and recursive BC have additional costs |
                     | **Completeness** | Full propositional resolution completeness | Complete for Horn-deducible Naked Single propagation |
                     """
                 )
@@ -636,7 +661,7 @@ st.divider()
 st.subheader(":material/school: User-Friendly Reasoning Trace (Tutor Mode)")
 
 # Sub-Section A: Step-by-Step Visual Playback Stepper
-if st.session_state.traces is not None:
+if st.session_state.traces:
     traces = st.session_state.traces
     total_steps = len(traces)
     
@@ -716,7 +741,7 @@ if st.session_state.traces is not None:
                         f"```prolog\n{step_data['horn_rule']}\n```"
                     )
                     st.markdown(
-                        f"- :material/lightbulb: **Plain-English Deduction:** Since all 8 other candidate values are eliminated by surrounding row, column, and box constraints, cell `({tr_cell[0]}, {tr_cell[1]})` is strictly forced to take value **`{tr_val}`** (*Naked Single*)."
+                        f"- :material/lightbulb: **Plain-English Deduction:** Since all {n - 1} other candidate values are eliminated by surrounding row, column, and box constraints, cell `({tr_cell[0]}, {tr_cell[1]})` is strictly forced to take value **`{tr_val}`** (*Naked Single*)."
                     )
 
 
@@ -730,47 +755,17 @@ with st.expander("Single-Cell Entailment Trace (Targeted Query)", expanded=(st.s
         
         st.markdown(f"#### Deductive Analysis for Cell `({r}, {c})` with Candidate Value `{v}`")
         
-        # 1. Givens Check
-        if (r, c) in givens:
-            given_v = givens[(r, c)]
-            if given_v == v:
-                st.markdown(f"- :material/check_circle: **Initial Clue (Given):** Cell `({r}, {c})` has value `{v}` directly from the initial puzzle setup (`givens`). No further elimination steps are required.")
-            else:
-                st.markdown(f"- :material/cancel: **Initial Clue Contradiction:** Cell `({r}, {c})` is already assigned value `{given_v}` in the initial clues, so it cannot hold value `{v}`.")
+        trace = qr['trace']
+        st.caption('This explanation uses recorded forward rule firings on the same Horn KB; the verdict above uses backward chaining.')
+        if trace['eliminated']:
+            st.markdown('**Proven eliminated candidates:** ' + ', '.join(map(str, trace['eliminated'])))
+        if trace['ruled_out']:
+            st.info(f'Value {v} is explicitly ruled out for cell ({r}, {c}).')
+        elif not entailed:
+            st.info('This value is not proved. Lack of a proof does not by itself mean the value is impossible.')
+        if trace['steps']:
+            with st.expander('Recorded proof steps', expanded=True):
+                for index, explanation in enumerate(trace['steps'], 1):
+                    st.markdown(f'{index}. {explanation}')
         else:
-            # 2. Peer Elimination Analysis for (r, c)
-            st.markdown("##### 1. Candidate Elimination Analysis (Row, Column, Box Peers)")
-            
-            br_start = ((r - 1) // box_h) * box_h + 1
-            bc_start = ((c - 1) // box_w) * box_w + 1
-            
-            eliminated_values = {}
-            for other_v in range(1, n + 1):
-                if other_v == v:
-                    continue
-                row_peer = next(((r, c2) for c2 in range(1, n + 1) if (r, c2) in givens and givens[(r, c2)] == other_v), None)
-                col_peer = next(((r2, c) for r2 in range(1, n + 1) if (r2, c) in givens and givens[(r2, c)] == other_v), None)
-                box_peer = next(((r2, c2) for r2 in range(br_start, br_start + box_h) for c2 in range(bc_start, bc_start + box_w) if (r2, c2) in givens and givens[(r2, c2)] == other_v), None)
-                
-                if row_peer:
-                    eliminated_values[other_v] = f"Row {r} already contains digit {other_v} at cell `{row_peer}`"
-                elif col_peer:
-                    eliminated_values[other_v] = f"Column {c} already contains digit {other_v} at cell `{col_peer}`"
-                elif box_peer:
-                    eliminated_values[other_v] = f"Subgrid Box already contains digit {other_v} at cell `{box_peer}`"
-                else:
-                    eliminated_values[other_v] = f"Eliminated through Horn clause definite inference chain"
-
-            for val, reason in sorted(eliminated_values.items()):
-                st.markdown(f"- :material/block: **Eliminated Candidate `{val}`:** {reason} $\\implies$ Proposition `Not{r}_{c}_{val}` is **True**.")
-                
-            st.markdown("##### 2. Conclusion Derivation (Naked Single / Last Candidate Rule)")
-            if entailed:
-                st.markdown(
-                    f"- :material/rule: **Horn Rule Applied:** $\\bigwedge_{{v' \\neq {v}}} Not_{{{r},{c},v'}} \\implies Is_{{{r},{c},{v}}}$\n\n"
-                    f"- :material/lightbulb: **Final Deduction:** Since all other candidate values have been eliminated by row, column, or subgrid constraints, cell `({r}, {c})` **must** hold value **`{v}`** (*Naked Single / Last Candidate Rule*)."
-                )
-            else:
-                st.markdown(
-                    f"- :material/warning: **Conclusion:** Value `{v}` cannot be proven for cell `({r}, {c})` because elimination premises are incomplete or conflict with row/column/box constraints."
-                )
+            st.info('No proof of this value or its elimination was found in the current Horn KB.')
