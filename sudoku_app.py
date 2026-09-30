@@ -14,14 +14,14 @@ from sudoku_solver import (
 
 # --- Streamlit Page Configuration ---
 st.set_page_config(
-    page_title="Sudoku Propositional Logic Solver",
+    page_title="Sudoku solver",
     page_icon=":material/grid_on:",
     layout="wide",
 )
 
-# --- Custom CSS for Clean, Modern Sudoku Board UI ---
-st.markdown("""
-<style>
+# --- Custom CSS for Clean, Modern Sudoku board UI ---
+BOARD_CSS = """
+
     .sudoku-container {
         display: flex;
         justify-content: center;
@@ -103,8 +103,61 @@ st.markdown("""
         color: #b45309;
         border: 1px dashed #f59e0b;
     }
-</style>
-""", unsafe_allow_html=True)
+"""
+st.markdown("<style>" + BOARD_CSS + "</style>", unsafe_allow_html=True)
+
+
+BOARD_COMPONENT = st.components.v2.component(
+    "sudoku_clickable_board",
+    html="<div id='board-root'></div>",
+    css=BOARD_CSS + """
+    .sudoku-board { width: 100%; max-width: 420px; table-layout: fixed; }
+    .sudoku-cell { padding: 0; width: auto; height: auto; }
+    .sudoku-cell button { display: block; width: 100%; aspect-ratio: 1;
+        border: 0; background: transparent; color: inherit; font: inherit;
+        font-weight: inherit; cursor: pointer; padding: 0; }
+    .sudoku-cell button:hover { box-shadow: inset 0 0 0 2px #64748b; }
+    .sudoku-cell button:focus-visible { outline: 3px solid #2563eb; outline-offset: -3px; }
+    """,
+    js="""
+    export default function(component) {
+        const { parentElement, data, setTriggerValue } = component;
+        const root = parentElement.querySelector('#board-root');
+        const focused = root.querySelector('button:focus');
+        const previous = focused ? [focused.dataset.row, focused.dataset.col] : null;
+        root.innerHTML = data.html;
+        const onClick = (event) => {
+            const button = event.target.closest('button[data-row]');
+            if (!button) return;
+            setTriggerValue('selected_cell', {
+                puzzle: data.puzzle, row: Number(button.dataset.row), col: Number(button.dataset.col)
+            });
+        };
+        root.addEventListener('click', onClick);
+        if (previous) root.querySelector(`button[data-row="${previous[0]}"][data-col="${previous[1]}"]`)?.focus();
+        return () => root.removeEventListener('click', onClick);
+    }
+    """,
+)
+
+
+def choose_board_cell():
+    event = st.session_state.get('sudoku_board', {}).get('selected_cell')
+    if not event or event.get('puzzle') != st.session_state.selected_puzzle_idx:
+        return
+    row, col = event.get('row'), event.get('col')
+    if not isinstance(row, int) or not isinstance(col, int) or not (1 <= row <= n and 1 <= col <= n):
+        return
+    st.session_state.query_row = row
+    st.session_state.query_col = col
+    select_query_cell()
+    st.session_state.active_tab = ":material/search: Check a cell"
+
+
+def select_query_cell():
+    st.session_state.highlight_target = (st.session_state.query_row, st.session_state.query_col)
+    st.session_state.highlight_peers = set()
+    st.session_state.query_result = None
 
 
 # --- Load Puzzle Pool ---
@@ -219,12 +272,12 @@ def capture_query_reasoning_trace(n, box_h, box_w, givens, r, c, v):
             continue
         prefix, sr, sc, sv = symbol_parts(symbol)
         if not proofs[symbol]:
-            steps.append(f'Given: cell ({sr}, {sc}) has value {sv}.')
+            steps.append(f'Starting clue: row {sr}, column {sc} contains {sv}.')
         elif prefix == 'Not':
             details = elimination_details(symbol, proofs)
             steps.append(f"{details['explanation']}; eliminate {sv} from cell ({sr}, {sc}).")
         else:
-            steps.append(f'All other candidates in cell ({sr}, {sc}) have been eliminated; deduce value {sv}.')
+            steps.append(f'All other numbers are ruled out in row {sr}, column {sc}, so the number must be {sv}.')
     return {
         'eliminated': [value for value in range(1, n + 1)
                        if atom('Not', r, c, value) in inferred],
@@ -272,10 +325,29 @@ def render_board_html(grid_dict, givens_dict, highlight_target=None, highlight_p
                 classes.append('cell-empty')
                 val = '&middot;'
                 
-            html.append(f'<td class="{" ".join(classes)}">{val}</td>')
+            label = f"Row {r}, column {c}, " + (f"number {val}" if (r, c) in grid_dict or is_given else "empty")
+            html.append(f'<td class="{" ".join(classes)}"><button type="button" data-row="{r}" data-col="{c}" aria-label="{label}" aria-pressed="{str(highlight_target == (r, c)).lower()}">{val}</button></td>')
         html.append('</tr>')
     html.append('</table></div>')
     return ''.join(html)
+
+
+def select_step(index):
+    st.session_state.step_index = index
+    st.session_state.step_slider = index
+    st.session_state.view_mode = "stepper"
+    st.session_state.highlight_target = None
+    st.session_state.highlight_peers = set()
+
+
+def select_slider_step():
+    select_step(st.session_state.step_slider)
+
+
+def show_full_solution():
+    st.session_state.view_mode = "full"
+    st.session_state.highlight_target = None
+    st.session_state.highlight_peers = set()
 
 
 # --- Initialize Session State ---
@@ -301,20 +373,27 @@ if 'view_mode' not in st.session_state:
     st.session_state.view_mode = "full"  # "full" or "stepper"
 
 
+st.session_state.setdefault('query_row', 1)
+st.session_state.setdefault('query_col', 1)
+st.session_state.setdefault('hint_traces', None)
+st.session_state.setdefault('hint_count', 0)
+st.session_state.setdefault('hint_message', None)
+
+
 # --- App Header ---
-st.title(":material/grid_on: Sudoku Propositional Logic Solver")
-st.markdown("An interactive application for exploring **Propositional Logic**, **Horn / Definite Clauses**, and **Forward & Backward Chaining Inference**.")
+st.title(":material/grid_on: Sudoku solver")
+st.markdown("Choose a puzzle, solve it, and follow the clues one step at a time.")
 
 # --- Sidebar: Puzzle Selector & Information ---
 with st.sidebar:
-    st.header(":material/tune: Puzzle Settings")
+    st.header(":material/tune: Your puzzle")
     puzzle_options = [
-        f"Puzzle {i + 1} ({p['given_count']} Initial Clues)"
+        f"Puzzle {i + 1} ({p['given_count']} clues)"
         for i, p in enumerate(puzzles)
     ]
     
     selected_option = st.selectbox(
-        "Select Puzzle:",
+        "Choose a puzzle",
         options=range(len(puzzles)),
         format_func=lambda i: puzzle_options[i],
         index=st.session_state.selected_puzzle_idx,
@@ -324,6 +403,11 @@ with st.sidebar:
     if selected_option != st.session_state.selected_puzzle_idx:
         st.session_state.selected_puzzle_idx = selected_option
         st.session_state.current_solution = None
+        st.session_state.hint_traces = None
+        st.session_state.hint_count = 0
+        st.session_state.hint_message = None
+        st.session_state.query_row = 1
+        st.session_state.query_col = 1
         st.session_state.solve_time = None
         st.session_state.solver_used = None
         st.session_state.query_result = None
@@ -331,21 +415,27 @@ with st.sidebar:
         st.session_state.highlight_peers = set()
         st.session_state.traces = None
         st.session_state.step_index = 0
+        st.session_state.step_slider = 0
         st.session_state.view_mode = "full"
 
     selected_puzzle = puzzles[st.session_state.selected_puzzle_idx]
     givens = {tuple(int(x) for x in k.split('_')): v for k, v in selected_puzzle['givens'].items()}
 
     st.divider()
-    st.markdown("### :material/info: Puzzle Metadata")
-    st.markdown(f"- **Grid Dimension:** {n} × {n}")
-    st.markdown(f"- **Box Dimensions:** {box_h} × {box_w}")
-    st.markdown(f"- **Initial Clues (Givens):** {len(givens)} cells")
-    st.markdown(f"- **Empty Cells to Solve:** {n * n - len(givens)} cells")
+    st.markdown("### :material/info: Puzzle details")
+    st.markdown(f"- **Board size:** {n} × {n}")
+    st.markdown(f"- **Box size:** {box_h} × {box_w}")
+    st.markdown(f"- **Starting clues:** {len(givens)} cells")
+    st.markdown(f"- **Empty cells:** {n * n - len(givens)} cells")
     
     st.divider()
-    if st.button("Reset Puzzle Board", icon=":material/refresh:"):
+    if st.button("Reset puzzle", icon=":material/refresh:"):
         st.session_state.current_solution = None
+        st.session_state.hint_traces = None
+        st.session_state.hint_count = 0
+        st.session_state.hint_message = None
+        st.session_state.query_row = 1
+        st.session_state.query_col = 1
         st.session_state.solve_time = None
         st.session_state.solver_used = None
         st.session_state.query_result = None
@@ -353,6 +443,7 @@ with st.sidebar:
         st.session_state.highlight_peers = set()
         st.session_state.traces = None
         st.session_state.step_index = 0
+        st.session_state.step_slider = 0
         st.session_state.view_mode = "full"
         st.rerun()
 
@@ -362,23 +453,29 @@ col_board, col_controls = st.columns([1.05, 1.35], gap="large")
 
 # --- Column 1: Visual Board Display ---
 with col_board:
-    st.subheader(":material/grid_view: Sudoku Board")
+    st.subheader(":material/grid_view: Sudoku board")
     
     # Visual Legend
     st.markdown(
         """
         <div style="display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 10px;">
-            <div><span class="status-badge badge-given">1-9</span> Initial Givens</div>
-            <div><span class="status-badge badge-solved">1-9</span> Solved by AI</div>
-            <div><span class="status-badge badge-target">Focus</span> Deduced Cell</div>
-            <div><span class="status-badge badge-peer">Peer</span> Eliminating Peers</div>
+            <div><span class="status-badge badge-given">1-9</span> Starting clues</div>
+            <div><span class="status-badge badge-solved">1-9</span> Solved cells</div>
+            <div><span class="status-badge badge-target">Focus</span> Selected cell</div>
+            <div><span class="status-badge badge-peer">Clue</span> Related clues</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
     
     # Determine which grid to display
-    if st.session_state.view_mode == "stepper" and st.session_state.traces is not None:
+    if st.session_state.view_mode == "hint":
+        hint_count = st.session_state.hint_count
+        hint = st.session_state.hint_traces[hint_count - 1] if hint_count else None
+        display_grid = hint['grid_after'] if hint else givens
+        target_hl = hint['cell'] if hint else None
+        peers_hl = set(hint['peer_cells']) if hint else set()
+    elif st.session_state.view_mode == "stepper" and st.session_state.traces is not None:
         idx = st.session_state.step_index
         if idx == 0:
             display_grid = givens
@@ -394,111 +491,146 @@ with col_board:
         target_hl = st.session_state.highlight_target
         peers_hl = st.session_state.highlight_peers
         
-    st.markdown(
-        render_board_html(
-            display_grid,
-            givens,
-            highlight_target=target_hl,
-            highlight_peers=peers_hl,
-        ),
-        unsafe_allow_html=True,
+    if st.session_state.highlight_target is not None:
+        target_hl = st.session_state.highlight_target
+        peers_hl = st.session_state.highlight_peers
+    st.caption("Click a cell to open Check a cell automatically. You can also use the Row and Column inputs.")
+    BOARD_COMPONENT(
+        data={'html': render_board_html(display_grid, givens, target_hl, peers_hl),
+              'puzzle': st.session_state.selected_puzzle_idx},
+        key="sudoku_board", on_selected_cell_change=choose_board_cell,
     )
-    
+    if st.session_state.highlight_target is not None:
+        selected_r, selected_c = st.session_state.highlight_target
+        st.caption(f"Selected: row {selected_r}, column {selected_c}")
+
     if st.session_state.solve_time is not None and st.session_state.view_mode == "full":
-        st.success(
-            f"Puzzle successfully solved with **{st.session_state.solver_used}** in **{st.session_state.solve_time:.4f} seconds**!",
-            icon=":material/check_circle:",
-        )
+        filled = len(st.session_state.current_solution)
+        if filled == n * n:
+            st.success(f"**Puzzle solved.** {st.session_state.solver_used} filled the board in {st.session_state.solve_time:.4f} seconds.", icon=":material/check_circle:")
+        else:
+            st.warning(f"**Some cells remain unresolved.** {n * n - filled} cells are still empty. The current rules cannot take this puzzle any further.")
+
+    if st.session_state.view_mode == "hint":
+        if st.session_state.hint_count:
+            hint = st.session_state.hint_traces[st.session_state.hint_count - 1]
+            hr, hc = hint['cell']
+            st.info(f"**Hint {st.session_state.hint_count}: row {hr}, column {hc} must be {hint['value']}.** All other numbers are ruled out by the clues.", icon=":material/lightbulb:")
+            with st.expander("Why this hint works", expanded=True):
+                for elimination in sorted(hint['eliminations'], key=lambda e: e['val']):
+                    st.write(f"{elimination['val']} does not fit: {elimination['explanation']}.")
+        if st.session_state.hint_message:
+            st.info(st.session_state.hint_message)
 
 
-# --- Column 2: Solver, Targeted Query & Knowledge Base Explorer Tabs ---
+# --- Column 2: Solver, Targeted Query & Behind the scenes Tabs ---
 with col_controls:
     
     # --- 3 Dedicated Tabs ---
     tab_solver, tab_query, tab_kb = st.tabs([
-        ":material/play_circle: Full-Grid Auto-Solver",
-        ":material/search: Targeted Query & Single-Cell Tutor",
-        ":material/menu_book: Knowledge Base Explorer",
-    ])
+        ":material/play_circle: Solve the puzzle",
+        ":material/search: Check a cell",
+        ":material/menu_book: Behind the scenes",
+    ], key="active_tab", on_change="rerun")
     
     # --- Tab 1: Full-Grid Solver ---
     with tab_solver:
         with st.container(border=True):
-            st.markdown("### :material/bolt: Full-Grid Auto-Solver")
-            st.markdown("Select a propositional logic inference algorithm to solve the complete grid:")
+            st.markdown("### :material/bolt: Solve the puzzle")
+            st.markdown("Choose how the solver works, then solve the puzzle or explore each step.")
             
             solver_choice = st.radio(
-                "Inference Algorithm:",
+                "Solving method",
                 options=[
-                    "Forward Chaining (solve_full_grid_fc)",
-                    "Backward Chaining (solve_full_grid_bc)",
+                    "Forward chaining",
+                    "Backward chaining",
                 ],
                 index=0,
+                help="Forward chaining starts with the clues and applies rules. Backward chaining starts with a possible answer and checks what supports it.",
             )
             
             btn_col1, btn_col2 = st.columns(2)
             with btn_col1:
-                solve_clicked = st.button("Solve Full Grid", type="primary", icon=":material/play_arrow:")
+                solve_clicked = st.button("Solve puzzle", type="primary", icon=":material/play_arrow:")
             with btn_col2:
-                step_clicked = st.button("Step-by-Step Stepper", type="secondary", icon=":material/step_into:")
+                step_clicked = st.button("Explore steps", type="secondary", icon=":material/step_into:")
                 
+            if st.button("Show a hint", icon=":material/lightbulb:", help="Reveal one more number and its explanation, without showing the full solution."):
+                if st.session_state.hint_traces is None:
+                    with st.spinner("Looking for the next step..."):
+                        st.session_state.hint_traces, _ = capture_full_grid_reasoning_trace(n, box_h, box_w, givens)
+                if st.session_state.hint_count < len(st.session_state.hint_traces):
+                    st.session_state.hint_count += 1
+                    st.session_state.hint_message = None
+                elif len(givens) + st.session_state.hint_count == n * n:
+                    st.session_state.hint_message = "You have reached the completed puzzle. There are no more hints."
+                else:
+                    st.session_state.hint_message = "No further hint is available. Some cells remain unresolved because the current rules cannot determine another number."
+                st.session_state.view_mode = "hint"
+                st.session_state.highlight_target = None
+                st.session_state.highlight_peers = set()
+                st.rerun()
+
             if solve_clicked or step_clicked:
-                with st.spinner("Executing propositional inference & capturing trace..."):
-                    t0 = time.perf_counter()
-                    if "Forward Chaining" in solver_choice:
-                        solved_grid = solve_full_grid_fc(n, box_h, box_w, givens)
-                        solver_name = "Forward Chaining"
-                    else:
-                        solved_grid = solve_full_grid_bc(n, box_h, box_w, givens)
-                        solver_name = "Backward Chaining"
-                    elapsed = time.perf_counter() - t0
-                    
-                    # Capture full deduction trace
-                    traces, _ = capture_full_grid_reasoning_trace(n, box_h, box_w, givens)
-                    
-                    st.session_state.current_solution = solved_grid
-                    st.session_state.solve_time = elapsed
-                    st.session_state.solver_used = solver_name
-                    st.session_state.traces = traces
-                    st.session_state.highlight_target = None
-                    st.session_state.highlight_peers = set()
-                    
-                    if step_clicked:
-                        st.session_state.view_mode = "stepper"
-                        st.session_state.step_index = 1 if traces else 0
-                    else:
-                        st.session_state.view_mode = "full"
-                    st.rerun()
+                # Reuse the current solution when opening the tutorial again.
+                reuse_solution = (
+                    step_clicked
+                    and st.session_state.current_solution is not None
+                    and st.session_state.solver_used == solver_choice
+                )
+                if not reuse_solution:
+                    with st.spinner("Solving the puzzle and preparing the steps..."):
+                        t0 = time.perf_counter()
+                        if solver_choice == "Forward chaining":
+                            solved_grid = solve_full_grid_fc(n, box_h, box_w, givens)
+                        else:
+                            solved_grid = solve_full_grid_bc(n, box_h, box_w, givens)
+                        elapsed = time.perf_counter() - t0
+                        traces, _ = capture_full_grid_reasoning_trace(n, box_h, box_w, givens)
+                        st.session_state.current_solution = solved_grid
+                        st.session_state.solve_time = elapsed
+                        st.session_state.solver_used = solver_choice
+                        st.session_state.traces = traces
+                        st.session_state.step_index = 0
+                        st.session_state.step_slider = 0
+                st.session_state.highlight_target = None
+                st.session_state.highlight_peers = set()
+                if step_clicked:
+                    select_step(st.session_state.step_index or (1 if st.session_state.traces else 0))
+                else:
+                    show_full_solution()
+                st.rerun()
 
             if st.session_state.solve_time is not None:
                 st.divider()
                 m1, m2 = st.columns(2)
                 with m1:
-                    st.metric(label="Execution Time", value=f"{st.session_state.solve_time:.4f} s", border=True)
+                    st.metric(label="Solve time", value=f"{st.session_state.solve_time:.4f} s", border=True)
                 with m2:
-                    st.metric(label="Solved Cells", value=f"{len(st.session_state.current_solution)} / {n*n}", border=True)
+                    st.metric(label="Filled cells", value=f"{len(st.session_state.current_solution)} / {n*n}", border=True)
 
     # --- Tab 2: Targeted Query & Tutor Mode ---
     with tab_query:
         with st.container(border=True):
-            st.markdown("### :material/fact_check: Cell Entailment Query ($Is_{r,c,v}$)")
-            st.markdown("Verify whether cell at row $r$, column $c$ holds value $v$ using `pl_bc_entails`:")
+            st.markdown("### :material/fact_check: Check a cell")
+            st.markdown("Pick a cell and a number to check whether the clues prove that it belongs there.")
             
             q_col1, q_col2, q_col3 = st.columns(3)
             with q_col1:
-                target_r = st.number_input("Row (r)", min_value=1, max_value=n, value=1, step=1)
+                target_r = st.number_input("Row", min_value=1, max_value=n, step=1, key="query_row", on_change=select_query_cell)
             with q_col2:
-                target_c = st.number_input("Column (c)", min_value=1, max_value=n, value=1, step=1)
+                target_c = st.number_input("Column", min_value=1, max_value=n, step=1, key="query_col", on_change=select_query_cell)
             with q_col3:
-                target_v = st.number_input("Value (v)", min_value=1, max_value=n, value=1, step=1)
+                target_v = st.number_input("Number", min_value=1, max_value=n, value=1, step=1)
             
-            check_btn = st.button("Test Proposition Is", type="secondary", icon=":material/search:")
+            check_btn = st.button("Check this number", type="secondary", icon=":material/search:")
             
             if check_btn:
-                st.session_state.view_mode = "full"
+                if st.session_state.view_mode != "hint":
+                    st.session_state.view_mode = "full"
                 st.session_state.highlight_target = (target_r, target_c)
                 
-                with st.spinner("Evaluating definite clauses with backward chaining..."):
+                with st.spinner("Checking the clues..."):
                     definite_kb = build_definite_kb(n, box_h, box_w, givens)
                     query_expr = atom('Is', target_r, target_c, target_v)
                     is_entailed = pl_bc_entails(definite_kb, query_expr)
@@ -524,6 +656,7 @@ with col_controls:
                         'entailed': is_entailed,
                         'trace': capture_query_reasoning_trace(n, box_h, box_w, givens, target_r, target_c, target_v),
                     }
+                st.rerun()
 
             # Display Query Result
             if st.session_state.query_result is not None:
@@ -533,54 +666,59 @@ with col_controls:
                 st.divider()
                 if entailed:
                     st.success(
-                        f"**ENTAILED (True):** Proposition `Is{r}_{c}_{v}` is logically entailed by the Knowledge Base!",
+                        f"**Yes (True).** Row {r}, column {c} must be **{v}**.",
                         icon=":material/check_circle:",
                     )
-                else:
+                elif qr['trace']['ruled_out']:
                     st.error(
-                        f"**NOT ENTAILED (False):** Proposition `Is{r}_{c}_{v}` cannot be proved from this Horn Knowledge Base.",
+                        f"**This number is ruled out (False).** Row {r}, column {c} cannot be **{v}**.",
                         icon=":material/cancel:",
                     )
+                else:
+                    st.info(
+                        f"**Not yet confirmed (False).** The current rules cannot confirm **{v}** in row {r}, column {c} yet. This does not mean the number is wrong.",
+                        icon=":material/help:",
+                    )
 
-    # --- Tab 3: Knowledge Base Explorer ---
+    # --- Tab 3: Behind the scenes ---
     with tab_kb:
         with st.container(border=True):
-            st.markdown("### :material/menu_book: Knowledge Base Explorer (General vs. Definite KB)")
-            st.markdown("Inspect propositional formalization, mathematical logic, clause statistics, and rule encodings across both representations.")
+            st.markdown("### :material/menu_book: Behind the scenes")
+            st.markdown("See how Sudoku rules are stored and used. The technical details below are optional.")
             
             kb_view = st.segmented_control(
-                "Knowledge Base Representation:",
+                "Rule format",
                 options=[
-                    "Definite / Horn KB (build_definite_kb)",
-                    "General CNF KB (build_general_kb)",
-                    "Side-by-Side Comparison",
+                    "Step-by-step rules (Horn)",
+                    "Sudoku constraints (CNF)",
+                    "Compare formats",
                 ],
-                default="Definite / Horn KB (build_definite_kb)",
+                default="Step-by-step rules (Horn)",
             )
             
             # Subview 1: Definite (Horn) KB
-            if kb_view == "Definite / Horn KB (build_definite_kb)":
-                st.markdown("#### :material/schema: Definite (Horn) Knowledge Base (`PropDefiniteKB`)")
-                st.markdown(r"Encodes Sudoku using **exactly one positive literal per definite clause** via the **Elimination + Last Candidate (Naked Single)** strategy.")
+            if kb_view == "Step-by-step rules (Horn)":
+                st.markdown("#### :material/schema: Rules for finding numbers")
+                st.markdown(r"These rules rule out numbers that do not fit. When only one number remains in a cell, the solver fills it in.")
                 
                 km1, km2, km3 = st.columns(3)
                 with km1:
-                    st.metric("Total Definite Clauses", f"{21141 + len(givens):,}", border=True)
+                    st.metric("Rules and clues", f"{21141 + len(givens):,}", border=True)
                 with km2:
-                    st.metric("Propositional Symbols", "1,458 (Is & Not)", border=True)
+                    st.metric("Logic symbols", "1,458 (Is & Not)", border=True)
                 with km3:
-                    st.metric("Supported Inference", "Forward & Backward Chaining", border=True)
+                    st.metric("Solving methods", "Forward & Backward Chaining", border=True)
                 
-                st.markdown("##### 🔍 Cell-Specific Horn Rule Inspector")
-                st.markdown("Select a cell to view all definite rules generated for it:")
+                st.markdown("##### Rules for a cell")
+                st.markdown("Choose a cell to see examples of its logic rules.")
                 ic_r, ic_c = st.columns(2)
                 with ic_r:
-                    insp_r = st.number_input("Cell Row (r)", min_value=1, max_value=n, value=1, step=1, key="def_insp_r")
+                    insp_r = st.number_input("Cell row", min_value=1, max_value=n, value=1, step=1, key="def_insp_r")
                 with ic_c:
-                    insp_c = st.number_input("Cell Column (c)", min_value=1, max_value=n, value=1, step=1, key="def_insp_c")
+                    insp_c = st.number_input("Cell column", min_value=1, max_value=n, value=1, step=1, key="def_insp_c")
                 
                 # Show Last-Candidate Horn rule for this cell
-                with st.expander(f"Last-Candidate (Naked Single) Horn Rules for Cell ({insp_r}, {insp_c})", expanded=True, icon=":material/rule:"):
+                with st.expander(f"When one number remains in row {insp_r}, column {insp_c}", expanded=True, icon=":material/rule:"):
                     st.markdown(r"Rules of the form: $\left(\bigwedge_{v' \neq v} Not_{r,c,v'}\right) \implies Is_{r,c,v}$")
                     for v_cand in range(1, min(4, n + 1)):
                         not_str = " & ".join([f"Not{insp_r}_{insp_c}_{v_oth}" for v_oth in range(1, n + 1) if v_oth != v_cand])
@@ -588,7 +726,7 @@ with col_controls:
                     if n > 3:
                         st.caption(f"... and {n - 3} more candidate deduction rules for values 4 to {n} in Cell ({insp_r}, {insp_c}).")
                 
-                with st.expander(f"Forward Elimination Rules Triggered by Cell ({insp_r}, {insp_c})", expanded=False, icon=":material/block:"):
+                with st.expander(f"How this cell rules out other numbers", expanded=False, icon=":material/block:"):
                     st.markdown(r"Rules of the form: $Is_{r,c,v} \implies Not_{r',c',v}$ (Peer Elimination):")
                     sample_v = 1
                     sample_elims = [
@@ -600,27 +738,27 @@ with col_controls:
                     ][:2]
                     for ser in sample_elims:
                         st.code(ser, language="prolog")
-                    st.caption("Each assigned value at this cell eliminates identical values across row, column, box, and other values in the same cell.")
+                    st.caption("Once this cell is filled, its number cannot appear elsewhere in the same row, column, or box. The cell cannot hold another number either.")
 
             # Subview 2: General CNF KB
-            elif kb_view == "General CNF KB (build_general_kb)":
-                st.markdown("#### :material/account_tree: General CNF Knowledge Base (`PropKB`)")
-                st.markdown("Encodes Sudoku using unrestricted Conjunctive Normal Form (CNF) clauses including disjunctions of positive literals.")
+            elif kb_view == "Sudoku constraints (CNF)":
+                st.markdown("#### :material/account_tree: Rules a completed Sudoku must follow")
+                st.markdown("Every cell needs one number. A number cannot repeat within a row, column, or box. The formulas below describe these rules.")
                 
                 gm1, gm2, gm3 = st.columns(3)
                 with gm1:
-                    st.metric("Total CNF Clauses", f"{10287 + len(givens):,}", border=True)
+                    st.metric("Constraints and clues", f"{10287 + len(givens):,}", border=True)
                 with gm2:
-                    st.metric("Propositional Symbols", "729 (Is only)", border=True)
+                    st.metric("Logic symbols", "729 (Is only)", border=True)
                 with gm3:
-                    st.metric("Supported Inference", "Resolution & Model Checking", border=True)
+                    st.metric("Solving methods", "Resolution & Model Checking", border=True)
                 
-                st.markdown("##### 📊 Clause Distribution Breakdown")
+                st.markdown("##### How the rules are counted")
                 st.markdown(
                     f"""
                     | Constraint Type | Logical Formula | Clause Count | Clause Size |
                     |---|---|---|---|
-                    | **Initial Givens** | $Is_{{r,c,v}}$ | {len(givens)} | 1 literal |
+                    | **Starting clues** | $Is_{{r,c,v}}$ | {len(givens)} | 1 literal |
                     | **At-least-one value per cell** | $Is_{{r,c,1}} \\lor \\dots \\lor Is_{{r,c,n}}$ | 81 | 9 positive literals |
                     | **At-most-one value per cell** | $\\neg Is_{{r,c,v_1}} \\lor \\neg Is_{{r,c,v_2}}$ | 2,916 | 2 negative literals |
                     | **Row Uniqueness** | $\\neg Is_{{r,c_1,v}} \\lor \\neg Is_{{r,c_2,v}}$ | 2,916 | 2 negative literals |
@@ -629,7 +767,7 @@ with col_controls:
                     """
                 )
                 
-                with st.expander("Sample CNF Clauses for Cell (1, 1)", expanded=True, icon=":material/data_object:"):
+                with st.expander("Example formulas for row 1, column 1", expanded=True, icon=":material/data_object:"):
                     st.markdown("**At-least-one value clause:**")
                     st.code("Is1_1_1 | Is1_1_2 | Is1_1_3 | Is1_1_4 | Is1_1_5 | Is1_1_6 | Is1_1_7 | Is1_1_8 | Is1_1_9", language="prolog")
                     st.markdown("**Sample at-most-one binary conflict clauses:**")
@@ -637,9 +775,9 @@ with col_controls:
                     st.markdown("**Sample row uniqueness clauses:**")
                     st.code("~Is1_1_1 | ~Is1_2_1\n~Is1_1_1 | ~Is1_3_1", language="prolog")
 
-            # Subview 3: Side-by-Side Comparison
+            # Subview 3: Compare formats
             else:
-                st.markdown("#### :material/compare_arrows: General KB vs. Definite (Horn) KB Comparison")
+                st.markdown("#### :material/compare_arrows: Compare the two rule formats")
                 st.markdown(
                     r"""
                     | Dimension | General KB (`build_general_kb`) | Definite / Horn KB (`build_definite_kb`) |
@@ -658,114 +796,83 @@ with col_controls:
 
 # --- Section 4: User-Friendly Reasoning Trace ("Tutor Mode") ---
 st.divider()
-st.subheader(":material/school: User-Friendly Reasoning Trace (Tutor Mode)")
+st.subheader(":material/school: How the puzzle is solved")
 
-# Sub-Section A: Step-by-Step Visual Playback Stepper
+# Sub-Section A: Step-by-step tutorial
 if st.session_state.traces:
     traces = st.session_state.traces
     total_steps = len(traces)
-    
     with st.container(border=True):
-        st.markdown(f"### :material/slow_motion_video: Step-by-Step Deduction Stepper ({total_steps} Deduction Steps)")
-        st.markdown("Navigate through each deduction step to visually inspect how the solver eliminates candidates and infers numbers in sequence.")
-        
-        # Navigation controls
-        c_nav1, c_nav2, c_nav3, c_nav4, c_nav5 = st.columns([1, 1, 3, 1, 1])
-        with c_nav1:
-            if st.button("First", icon=":material/first_page:"):
-                st.session_state.view_mode = "stepper"
-                st.session_state.step_index = 0
-                st.rerun()
-        with c_nav2:
-            if st.button("Prev", icon=":material/chevron_left:"):
-                st.session_state.view_mode = "stepper"
-                st.session_state.step_index = max(0, st.session_state.step_index - 1)
-                st.rerun()
-        with c_nav3:
-            curr_step = st.slider(
-                "Step Selector:",
-                min_value=0,
-                max_value=total_steps,
-                value=st.session_state.step_index,
-                format="Step %d",
-                label_visibility="collapsed",
-            )
-            if curr_step != st.session_state.step_index:
-                st.session_state.view_mode = "stepper"
-                st.session_state.step_index = curr_step
-                st.rerun()
-        with c_nav4:
-            if st.button("Next", icon=":material/chevron_right:"):
-                st.session_state.view_mode = "stepper"
-                st.session_state.step_index = min(total_steps, st.session_state.step_index + 1)
-                st.rerun()
-        with c_nav5:
-            if st.button("Last", icon=":material/last_page:"):
-                st.session_state.view_mode = "stepper"
-                st.session_state.step_index = total_steps
-                st.rerun()
-                
-        # Detailed Card for Active Step
-        step_i = st.session_state.step_index
-        if step_i == 0:
-            st.info("Step 0: Initial Board State (Only Givens). Click **Next** or move the slider to see the first deduction step.", icon=":material/info:")
+        st.markdown("### :material/slow_motion_video: Follow the clues")
+        st.caption("Use the controls to see how each number is found. Step 0 shows the starting clues.")
+        if st.session_state.view_mode == "stepper":
+            st.button("View full solution", icon=":material/grid_on:", on_click=show_full_solution)
         else:
-            step_data = traces[step_i - 1]
-            tr_cell = step_data['cell']
-            tr_val = step_data['value']
-            
-            st.markdown(
-                f"#### :material/check_circle: Step {step_i} of {total_steps}: Deducing `Cell ({tr_cell[0]}, {tr_cell[1]})` $\\longrightarrow$ Value **`{tr_val}`**"
-            )
-            st.markdown(f"*{step_data['summary']}*")
-            
-            # Expandable Card for Rule-Firing Hierarchy
-            with st.expander("Expand Rule-Firing Hierarchy & Natural Language Breakdown", expanded=True, icon=":material/account_tree:"):
-                col_rules1, col_rules2 = st.columns([1.1, 0.9])
-                
-                with col_rules1:
-                    st.markdown("##### 1. Elimination Rule Firings ($Is \\implies Not$)")
-                    for elim in step_data['eliminations']:
-                        p_scope = elim['scope']
-                        p_cell = elim['peer_cell']
-                        p_val = elim['val']
-                        st.markdown(
-                            f"- :material/block: **Eliminate `{p_val}`:** {elim['explanation']} $\\implies$ `Is{p_cell[0]}_{p_cell[1]}_{p_val} ==> Not{tr_cell[0]}_{tr_cell[1]}_{p_val}`"
-                        )
-                        
-                with col_rules2:
-                    st.markdown("##### 2. Last-Candidate Horn Rule Firing")
-                    st.markdown(
-                        f"**Horn Clause Head:** `Is{tr_cell[0]}_{tr_cell[1]}_{tr_val}`\n\n"
-                        f"**Definite Implication:**\n"
-                        f"```prolog\n{step_data['horn_rule']}\n```"
-                    )
-                    st.markdown(
-                        f"- :material/lightbulb: **Plain-English Deduction:** Since all {n - 1} other candidate values are eliminated by surrounding row, column, and box constraints, cell `({tr_cell[0]}, {tr_cell[1]})` is strictly forced to take value **`{tr_val}`** (*Naked Single*)."
-                    )
+            st.button("Resume steps", icon=":material/step_into:", on_click=select_step,
+                      args=(st.session_state.step_index,))
+            st.caption("Choose Resume steps to return to the walkthrough.")
+
+        if st.session_state.view_mode == "stepper":
+            step_i = st.session_state.step_index
+            st.markdown(f"**Step {step_i} of {total_steps}**")
+            first, previous, following, last = st.columns(4)
+            with first:
+                st.button("Start", icon=":material/first_page:", disabled=step_i == 0,
+                          on_click=select_step, args=(0,))
+            with previous:
+                st.button("Previous", icon=":material/chevron_left:", disabled=step_i == 0,
+                          on_click=select_step, args=(max(0, step_i - 1),))
+            with following:
+                st.button("Next", icon=":material/chevron_right:", disabled=step_i == total_steps,
+                          on_click=select_step, args=(min(total_steps, step_i + 1),))
+            with last:
+                st.button("Last step", icon=":material/last_page:", disabled=step_i == total_steps,
+                          on_click=select_step, args=(total_steps,))
+            # A hidden widget's state may be removed by Streamlit between views.
+            st.session_state.setdefault('step_slider', step_i)
+            st.slider("Go to step", min_value=0, max_value=total_steps,
+                      key="step_slider", on_change=select_slider_step, format="Step %d")
+            if step_i == 0:
+                st.info("These are the starting clues. Choose Next to see the first number the solver finds.", icon=":material/info:")
+            else:
+                step_data = traces[step_i - 1]
+                r, c = step_data['cell']
+                value = step_data['value']
+                st.markdown(f"#### Row {r}, column {c} must be {value}")
+                st.write(f"The clues rule out all {n - 1} other numbers, leaving only {value}.")
+                with st.expander("Why the other numbers do not fit", expanded=True):
+                    for elimination in sorted(step_data['eliminations'], key=lambda e: e['val']):
+                        st.markdown(f"- **{elimination['val']} does not fit:** {elimination['explanation']}.")
+                with st.expander("Technical details: logic rules", expanded=False):
+                    st.caption("These are the rules used for this step. Is means a cell has a number; Not means that number is ruled out.")
+                    for elimination in step_data['eliminations']:
+                        st.code(elimination['rule'], language="text")
+                    st.code(step_data['horn_rule'], language="text")
+else:
+    st.info("Choose Explore steps above to follow the solution one number at a time.", icon=":material/info:")
 
 
 # Sub-Section B: Targeted Query Deduction Trace
-with st.expander("Single-Cell Entailment Trace (Targeted Query)", expanded=(st.session_state.query_result is not None), icon=":material/fact_check:"):
+with st.expander("Why this cell check returned that result", expanded=(st.session_state.query_result is not None), icon=":material/fact_check:"):
     if st.session_state.query_result is None:
-        st.info("Test a cell query in the **Targeted Query & Single-Cell Tutor** tab above to inspect its step-by-step reasoning trace.", icon=":material/info:")
+        st.info("Use **Check a cell** above to see the reasons behind the answer.", icon=":material/info:")
     else:
         qr = st.session_state.query_result
         r, c, v, entailed = qr['r'], qr['c'], qr['v'], qr['entailed']
         
-        st.markdown(f"#### Deductive Analysis for Cell `({r}, {c})` with Candidate Value `{v}`")
+        st.markdown(f"#### Row {r}, column {c}: checking {v}")
         
         trace = qr['trace']
-        st.caption('This explanation uses recorded forward rule firings on the same Horn KB; the verdict above uses backward chaining.')
+        st.caption('These steps show which clues support the answer.')
         if trace['eliminated']:
-            st.markdown('**Proven eliminated candidates:** ' + ', '.join(map(str, trace['eliminated'])))
+            st.markdown('**Numbers ruled out:** ' + ', '.join(map(str, trace['eliminated'])))
         if trace['ruled_out']:
-            st.info(f'Value {v} is explicitly ruled out for cell ({r}, {c}).')
+            st.info(f'The clues rule out {v} in row {r}, column {c}.')
         elif not entailed:
-            st.info('This value is not proved. Lack of a proof does not by itself mean the value is impossible.')
+            st.info('The rules cannot decide this number yet. That does not necessarily mean it is wrong.')
         if trace['steps']:
-            with st.expander('Recorded proof steps', expanded=True):
+            with st.expander('Show the explanation', expanded=True):
                 for index, explanation in enumerate(trace['steps'], 1):
                     st.markdown(f'{index}. {explanation}')
         else:
-            st.info('No proof of this value or its elimination was found in the current Horn KB.')
+            st.info('The current rules cannot confirm or rule out this number.')
